@@ -75,20 +75,17 @@ public class AmazonSesAdapter implements BridgeAdapter {
         public static final String ACCESS_KEY = "Access Key";
         public static final String SECRET_KEY = "Secret Key";
         public static final String REGION = "Region";
-        public static final String API_VERSION = "API Version";
     }
     
     private final ConfigurablePropertyMap properties = new ConfigurablePropertyMap(
         new ConfigurableProperty(Properties.ACCESS_KEY).setIsRequired(true),
         new ConfigurableProperty(Properties.SECRET_KEY).setIsRequired(true).setIsSensitive(true),
-        new ConfigurableProperty(Properties.REGION).setIsRequired(true),
-        new ConfigurableProperty(Properties.API_VERSION).setIsRequired(true).setValue("2010-12-01")
+        new ConfigurableProperty(Properties.REGION).setIsRequired(true)
     );
     
     private String accessKey;
     private String secretKey;
     private String region;
-    private String apiVersion;
     
     /*---------------------------------------------------------------------------------------------
      * SETUP METHODS
@@ -99,7 +96,6 @@ public class AmazonSesAdapter implements BridgeAdapter {
         this.accessKey = properties.getValue(Properties.ACCESS_KEY);
         this.secretKey = properties.getValue(Properties.SECRET_KEY);
         this.region = properties.getValue(Properties.REGION);
-        this.apiVersion = properties.getValue(Properties.API_VERSION);
     }
     
     @Override
@@ -122,178 +118,128 @@ public class AmazonSesAdapter implements BridgeAdapter {
         return properties;
     }
     
+    private static final Map<String,String> NON_STD_STR_MAPPINGS = new HashMap() {{
+        put("DescribeActiveReceiptRuleSet","Rules");
+        put("DescribeReceiptRule","Rule");
+        put("DescribeReceiptRuleSet","Rules");
+        put("GetSendQuota",null);
+        put("GetSendStatistics","SendDataPoints");
+        put("ListIdentityPolicies","PolicyNames");
+    }};
+    
     /*---------------------------------------------------------------------------------------------
      * IMPLEMENTATION METHODS
      *-------------------------------------------------------------------------------------------*/
 
     @Override
     public Count count(BridgeRequest request) throws BridgeError {
-        String structure = request.getStructure();
-        if (!structure.startsWith("List") && !structure.startsWith("Get") && !structure.startsWith("Describe")) {
-            throw new BridgeError("Invalid Structure: '"+request.getStructure()+"' is not a currently supported structure.");
-        }
+        RecordList recordList = search(request);
         
-        AmazonSesQualificationParser parser = new AmazonSesQualificationParser();
-        String query = parser.parse(request.getQuery(),request.getParameters());
-        
-        // The headers that we want to add to the request
-        List<String> headers = new ArrayList<String>();
-        
-        // Build the url to retrieve the ec2 data
-        StringBuilder url = new StringBuilder();
-        url.append("https://email.").append(this.region).append(".amazonaws.com");
-        url.append("?Version=").append(this.apiVersion);
-        url.append("&Action=").append(structure);
-        if (!query.isEmpty()) url.append("&").append(query);
-        
-        // Make the request using the built up url/headers and bridge properties
-        HttpResponse response = request("GET",url.toString(),headers,this.region,"email","",this.accessKey,this.secretKey);
-        String output;
-        try {
-            output = EntityUtils.toString(response.getEntity());
-        } catch (IOException e) { throw new BridgeError(e); }
-        
-        JSONObject json = (JSONObject)JSONValue.parse(XML.toJSONObject(output).toString());
-        JSONObject result = (JSONObject)json.get(structure+"Result");
-        Map<String,Object> record = buildRecord(result);
-                        
-                
-        int count;
-        if (request.getStructure().startsWith("List")) {
-            // Get the field name to retrieve - ListClusters becomes clusterArn, ListTasks becomes taskArn, etc.
-            String fieldName = structure.substring(4,structure.length()-1).concat("Arn");
-            fieldName = fieldName.substring(0, 1).toLowerCase() + fieldName.substring(1);
-            JSONArray structureArns = (JSONArray)json.get(fieldName+"s");
-            count = structureArns.size();
-        } else {
-            String structureField = structure.substring(8).toLowerCase();
-            JSONArray structureObjs = (JSONArray)json.get(structureField);
-            count = structureObjs.size();
-        }
-        
-        return new Count(count);
+        return new Count(recordList.getRecords().size());
     }
 
     @Override
     public Record retrieve(BridgeRequest request) throws BridgeError {
-        String structure = request.getStructure();
-        if (!structure.startsWith("List") && !structure.startsWith("Get") && !structure.startsWith("Describe")) {
-            throw new BridgeError("Invalid Structure: '"+request.getStructure()+"' is not a currently supported structure.");
+        RecordList recordList = search(request);
+        List<Record> records = recordList.getRecords();
+        
+        Record record;
+        if (records.size() > 1) {
+            throw new BridgeError("Multiple results matched an expected single match query");
+        } else if (records.isEmpty()) {
+            record = new Record(null);
+        } else {
+            if (request.getFields() == null || request.getFields().isEmpty()) {
+                record = records.get(0);
+            } else {
+                Map<String,Object> recordObject = new LinkedHashMap<String,Object>();
+                for (String field : request.getFields()) {
+                    recordObject.put(field, records.get(0).getValue(field));
+                }
+                record = new Record(recordObject);
+            }
         }
         
-        AmazonSesQualificationParser parser = new AmazonSesQualificationParser();
-        String query = parser.parse(request.getQuery(),request.getParameters());
-        
-        // The headers that we want to add to the request
-        List<String> headers = new ArrayList<String>();
-        
-        // Build the url to retrieve the ec2 data
-        StringBuilder url = new StringBuilder();
-        url.append("https://email.").append(this.region).append(".amazonaws.com");
-        url.append("?Version=").append(this.apiVersion);
-        url.append("&Action=").append(structure);
-        if (!query.isEmpty()) url.append("&").append(query);
-        
-        // Make the request using the built up url/headers and bridge properties
-        HttpResponse response = request("GET",url.toString(),headers,this.region,"email","",this.accessKey,this.secretKey);
-        String output;
-        try {
-            output = EntityUtils.toString(response.getEntity());
-        } catch (IOException e) { throw new BridgeError(e); }
-        
-        JSONObject json = (JSONObject)JSONValue.parse(XML.toJSONObject(output).toString());
-        JSONObject structureResponse = (JSONObject)json.get(structure+"Response");
-        JSONObject structureResult = (JSONObject)structureResponse.get(structure+"Result");
-        Map<String,Object> record = buildRecord(structureResult);
-        
-        return new Record(record);
-//        
-//        Record record;
-//        if (records.size() > 1) {
-//            throw new BridgeError("Multiple results matched an expected single match query");
-//        } else if (records.isEmpty()) {
-//            record = new Record(null);
-//        } else {
-//            if (request.getFields() == null || request.getFields().isEmpty()) {
-//                record = records.get(0);
-//            } else {
-//                Map<String,Object> recordObject = new LinkedHashMap<String,Object>();
-//                for (String field : request.getFields()) {
-//                    recordObject.put(field, records.get(0).getValue(field));
-//                }
-//                record = new Record(recordObject);
-//            }
-//        }
-//        
-//        return record;
+        return record;
     }
 
     @Override
     public RecordList search(BridgeRequest request) throws BridgeError {
         String structure = request.getStructure();
-        if (!structure.startsWith("List") && !structure.startsWith("Describe")) {
+        if (!structure.startsWith("List") && !structure.startsWith("Get") && !structure.startsWith("Describe")) {
             throw new BridgeError("Invalid Structure: '"+request.getStructure()+"' is not a currently supported structure.");
         }
         
         AmazonSesQualificationParser parser = new AmazonSesQualificationParser();
         String query = parser.parse(request.getQuery(),request.getParameters());
         
-        // Build up the request query into a JSON object
-        Map<String,Object> jsonQuery = new HashMap<String,Object>();
-        if (query != null && !query.isEmpty()) {
-            for (String part : query.split("&")) {
-                String[] keyValue = part.split("=");
-                String key = keyValue[0].trim();
-                String value = keyValue[1].trim();
-                // If the value is surrounded by [ ] it should be turned into a string list
-                if (value.startsWith("[") && value.endsWith("]")) {
-                    jsonQuery.put(key,Arrays.asList(value.substring(1,value.length()-1).split(",")));
-                } else {
-                    jsonQuery.put(key,value);
-                }
-            }
-        }
-        
         // The headers that we want to add to the request
         List<String> headers = new ArrayList<String>();
-        headers.add("Content-Type: application/x-amz-json-1.1");
-        headers.add("x-amz-target: AmazonEC2ContainerServiceV20141113."+structure);
+        
+        // Build the url to retrieve the ec2 data
+        StringBuilder url = new StringBuilder();
+        url.append("https://email.").append(this.region).append(".amazonaws.com");
+        url.append("?Version=2010-12-01&Action=").append(structure);
+        if (!query.isEmpty()) url.append("&").append(query);
         
         // Make the request using the built up url/headers and bridge properties
-        HttpResponse response = request("POST","https://ecs.us-east-1.amazonaws.com",headers,this.region,"ecs",JSONValue.toJSONString(jsonQuery),this.accessKey,this.secretKey);
+        HttpResponse response = request("GET",url.toString(),headers,this.region,"email","",this.accessKey,this.secretKey);
         String output;
         try {
             output = EntityUtils.toString(response.getEntity());
         } catch (IOException e) { throw new BridgeError(e); }
         
-        JSONObject json = (JSONObject)JSONValue.parse(output);
-        if (json.containsKey("__type")) {
-            logger.error(output);
-            if (json.get("__type").toString().equals("UnknownOperationException")) {
-                throw new BridgeError("Invalid Structure: '"+structure+"' is not a currently supported structure.");
-            } else {
-                StringBuilder errorMessage = new StringBuilder("Error retrieving ECS records (See logs for more details)");
-                errorMessage.append(" -- Type: ").append(json.get("__type").toString());
-                if (json.containsKey("Message")) errorMessage.append(" -- Message: ").append(json.get("Message").toString());
-                throw new BridgeError(errorMessage.toString());
-            }
-        }
-        List<Record> records = new ArrayList<Record>();
-        if (request.getStructure().startsWith("List")) {
-            // Get the field name to retrieve - ListClusters becomes clusterArn, ListTasks becomes taskArn, etc.
-            String fieldName = structure.substring(4,structure.length()-1).concat("Arn");
-            fieldName = fieldName.substring(0, 1).toLowerCase() + fieldName.substring(1);
-            JSONArray structureArns = (JSONArray)json.get(fieldName+"s");
-            for (Object o  : structureArns) {
-                Map<String,Object> recordObj = new HashMap();
-                recordObj.put(fieldName, o.toString());
-                records.add(new Record(recordObj));
-            }
+        // Parse through the returned XML to get the structure records
+        JSONObject json = (JSONObject)JSONValue.parse(XML.toJSONObject(output).toString());
+        JSONObject structureResponse = (JSONObject)json.get(structure+"Response");
+        JSONObject structureResult = (JSONObject)structureResponse.get(structure+"Result");
+        String structureIdentifier = NON_STD_STR_MAPPINGS.containsKey(structure) ? NON_STD_STR_MAPPINGS.get(structure) : structure.replaceFirst("\\A(?:GetIdentity|ListReceipt|List|Get|Describe)","");
+        Object structureObj = structureIdentifier == null ? structureResult : structureResult.get(structureIdentifier);
+        
+        // Parse through the returned records - also handling converting 0 records returned and 
+        // 1 record retured to a JSONArray from an empty string and JSONObject respectively.
+        JSONArray resultArray;
+        if (structureObj instanceof JSONArray) {
+            resultArray = (JSONArray)structureObj;
+        } else if (structureObj instanceof JSONObject) {
+            resultArray = new JSONArray();
+            resultArray.add(structureObj);
         } else {
-            String structureField = structure.substring(8).toLowerCase();
-            JSONArray structureObjs = (JSONArray)json.get(structureField);
-            for (Object o : structureObjs) {
-                records.add(new Record((Map)o));
+            resultArray = new JSONArray();
+        }       
+        
+        List<Record> records = new ArrayList<Record>();
+        for (Object o : resultArray) {
+            JSONObject recordObj = (JSONObject)o;
+            if (recordObj.keySet().size() == 1 && recordObj.containsKey("member")) {
+                // If the only key returned is member, the records are actually all listened under the
+                // member object. The logic here converts the object under each member key to a
+                // record object.
+                Object member = recordObj.get("member");
+                if (member instanceof JSONObject) {
+                    records.add(new Record(buildRecord((JSONObject)member)));
+                } else if (member instanceof JSONArray) {
+                    for (Object memberArray : (JSONArray)member) {
+                        if (memberArray instanceof JSONObject) {
+                            records.add(new Record(buildRecord((JSONObject)memberArray)));
+                        } else {
+                            Map<String,Object> memberObj = new HashMap<String,Object>();
+                            memberObj.put("member",memberArray);
+                            records.add(new Record(memberObj));
+                        }
+                    }
+                } else {
+                    // Anything other than an empty string create a new record object with member
+                    // as the field and the object as the value
+                    if (!"".equals(o)) {
+                        Map<String,Object> memberObj = new HashMap<String,Object>();
+                        memberObj.put("member",member);
+                        records.add(new Record(memberObj));
+                    }
+                }
+            } else {
+                // If the member key isn't the only key returned, handle the response like a single record
+                records.add(new Record(buildRecord((JSONObject)o)));
             }
         }
         
@@ -314,6 +260,52 @@ public class AmazonSesAdapter implements BridgeAdapter {
     /*----------------------------------------------------------------------------------------------
      * HELPER METHODS
      *--------------------------------------------------------------------------------------------*/
+    
+    private static final List<String> LIST_FIELD_KEYWORDS = new ArrayList(Arrays.asList(new String[] {
+        "Attributes","Tokens"
+    }));
+    
+    private Map<String,Object> buildRecord(JSONObject json) throws BridgeError {
+        // Return the json keys
+        Map<String,Object> record = new LinkedHashMap<String,Object>();
+        Set<String> keys = json.keySet();
+        for (String key : keys) {
+            Object keyObject = json.get(key);
+            for (String keyword : LIST_FIELD_KEYWORDS) {
+                if (key.contains(keyword) && !(keyObject instanceof JSONArray)) {
+                    JSONArray jsonArray = new JSONArray();
+                    if (keyObject != null && keyObject != "") {
+                        jsonArray.add(keyObject);
+                    }
+                    keyObject = jsonArray;
+                    break;
+                }
+            }
+            if (!record.containsKey(key)) {
+                if (keyObject instanceof JSONObject) {
+                    record.put(key,buildRecord((JSONObject)keyObject));
+                } else if (keyObject instanceof JSONArray) {
+                    JSONArray jsonArray = (JSONArray)keyObject;
+                    record.put(key, new JSONArray());
+                    for (Object o : jsonArray) {
+                        if (o instanceof JSONArray) {
+                            logger.debug(JSONValue.toJSONString(json));
+                            throw new BridgeError("Bridge currently does not support parsing of nested JSON Arrays (at key == '"+key+"').");
+                        }
+                        else if (o instanceof JSONObject) {
+                            ((List)record.get(key)).add(buildRecord((JSONObject)o));
+                        } else {
+                            ((List)record.get(key)).add(o);
+                        }
+                    }
+                } else {
+                    record.put(key,keyObject);
+                }
+            }
+        }
+        return record;
+    }
+    
     /**
      * This method builds and sends a request to the Amazon EC2 REST API given the inputted
      * data and return a HttpResponse object after the call has returned. This method mainly helps with
@@ -494,50 +486,4 @@ public class AmazonSesAdapter implements BridgeAdapter {
          byte[] kSigning = HmacSHA256(kService, "aws4_request");
          return kSigning;
     }
-    
-    private static final List<String> LIST_FIELD_KEYWORDS = new ArrayList(Arrays.asList(new String[] {
-        "Attributes","Tokens"
-    }));
-    
-    private Map<String,Object> buildRecord(JSONObject json) throws BridgeError {
-        // Return the json keys
-        Map<String,Object> record = new LinkedHashMap<String,Object>();
-        Set<String> keys = json.keySet();
-        for (String key : keys) {
-            Object keyObject = json.get(key);
-            for (String keyword : LIST_FIELD_KEYWORDS) {
-                if (key.contains(keyword) && !(keyObject instanceof JSONArray)) {
-                    JSONArray jsonArray = new JSONArray();
-                    if (keyObject != null && keyObject != "") {
-                        jsonArray.add(keyObject);
-                    }
-                    keyObject = jsonArray;
-                    break;
-                }
-            }
-            if (!record.containsKey(key)) {
-                if (keyObject instanceof JSONObject) {
-                    record.put(key,buildRecord((JSONObject)keyObject));
-                } else if (keyObject instanceof JSONArray) {
-                    JSONArray jsonArray = (JSONArray)keyObject;
-                    record.put(key, new JSONArray());
-                    for (Object o : jsonArray) {
-                        if (o instanceof JSONArray) {
-                            logger.debug(JSONValue.toJSONString(json));
-                            throw new BridgeError("Bridge currently does not support parsing of nested JSON Arrays (at key == '"+key+"').");
-                        }
-                        else if (o instanceof JSONObject) {
-                            ((List)record.get(key)).add(buildRecord((JSONObject)o));
-                        } else {
-                            ((List)record.get(key)).add(o);
-                        }
-                    }
-                } else {
-                    record.put(key,keyObject);
-                }
-            }
-        }
-        return record;
-    }
- 
 }
