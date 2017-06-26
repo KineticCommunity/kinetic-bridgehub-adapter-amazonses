@@ -3,6 +3,7 @@ package com.kineticdata.bridgehub.adapter.amazonses;
 import com.kineticdata.bridgehub.adapter.BridgeAdapter;
 import com.kineticdata.bridgehub.adapter.BridgeError;
 import com.kineticdata.bridgehub.adapter.BridgeRequest;
+import com.kineticdata.bridgehub.adapter.BridgeUtils;
 import com.kineticdata.bridgehub.adapter.Count;
 import com.kineticdata.bridgehub.adapter.Record;
 import com.kineticdata.bridgehub.adapter.RecordList;
@@ -25,6 +26,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.commons.codec.binary.Hex;
@@ -118,6 +121,13 @@ public class AmazonSesAdapter implements BridgeAdapter {
         return properties;
     }
     
+    private static final Map<String,String> STR_ALIASES = new HashMap() {{
+        put("Identities","ListIdentities");
+        put("SendStatistics","GetSendStatistics");
+        put("SendQuota","GetSendQuota");
+        put("VerifiedEmailAddresses","ListVerifiedEmailAddresses");
+    }};
+    
     private static final Map<String,String> NON_STD_STR_MAPPINGS = new HashMap() {{
         put("DescribeActiveReceiptRuleSet","Rules");
         put("DescribeReceiptRule","Rule");
@@ -165,10 +175,10 @@ public class AmazonSesAdapter implements BridgeAdapter {
 
     @Override
     public RecordList search(BridgeRequest request) throws BridgeError {
-        String structure = request.getStructure();
-        if (!structure.startsWith("List") && !structure.startsWith("Get") && !structure.startsWith("Describe")) {
-            throw new BridgeError("Invalid Structure: '"+request.getStructure()+"' is not a currently supported structure.");
-        }
+        // Get the aliased structure if it exists
+        String structure = STR_ALIASES.containsKey(request.getStructure())
+                ? STR_ALIASES.get(request.getStructure())
+                : request.getStructure();
         
         AmazonSesQualificationParser parser = new AmazonSesQualificationParser();
         String query = parser.parse(request.getQuery(),request.getParameters());
@@ -191,6 +201,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
         
         // Parse through the returned XML to get the structure records
         JSONObject json = (JSONObject)JSONValue.parse(XML.toJSONObject(output).toString());
+        if (json.containsKey("ErrorResponse")) throw new BridgeError("Invalid Structure: '"+request.getStructure()+"' is not a currently supported structure.");
         JSONObject structureResponse = (JSONObject)json.get(structure+"Response");
         JSONObject structureResult = (JSONObject)structureResponse.get(structure+"Result");
         String structureIdentifier = NON_STD_STR_MAPPINGS.containsKey(structure) ? NON_STD_STR_MAPPINGS.get(structure) : structure.replaceFirst("\\A(?:GetIdentity|ListReceipt|List|Get|Describe)","");
@@ -248,6 +259,21 @@ public class AmazonSesAdapter implements BridgeAdapter {
         List<String> fields = request.getFields();
         if ((fields == null || fields.isEmpty()) && !records.isEmpty()) fields = new ArrayList<String>(records.get(0).getRecord().keySet());
         
+        // Filter and sort the records
+        records = filterRecords(records,query);
+        if (request.getMetadata("order") == null) {
+            // name,type,desc assumes name ASC,type ASC,desc ASC
+            Map<String,String> defaultOrder = new LinkedHashMap<String,String>();
+            for (String field : fields) {
+                defaultOrder.put(field, "ASC");
+            }
+            records = BridgeUtils.sortRecords(defaultOrder, records);
+        } else {
+            // Creates a map out of order metadata
+            Map<String,String> orderParse = BridgeUtils.parseOrder(request.getMetadata("order"));
+            records = BridgeUtils.sortRecords(orderParse, records);
+        }
+        
         // Define the metadata
         Map<String,String> metadata = new LinkedHashMap<String,String>();
         metadata.put("size",String.valueOf(records.size()));
@@ -304,6 +330,80 @@ public class AmazonSesAdapter implements BridgeAdapter {
             }
         }
         return record;
+    }
+    
+    private Pattern getPatternFromValue(String value) {
+        // Escape regex characters from value
+        String[] parts = value.split("(?<!\\\\)%");
+        for (int i = 0; i<parts.length; i++) {
+            if (!parts[i].isEmpty()) parts[i] = Pattern.quote(parts[i].replaceAll("\\\\%","%"));
+        }
+        String regex = StringUtils.join(parts,".*?");
+        if (!value.isEmpty() && value.substring(value.length() - 1).equals("%")) regex += ".*?";
+        return Pattern.compile("^"+regex+"$",Pattern.CASE_INSENSITIVE);
+    }
+    
+    protected final List<Record> filterRecords(List<Record> records, String query) throws BridgeError {
+        if (query == null || query.isEmpty()) return records;
+        String[] queryParts = query.split("&");
+        
+        Map<String[],Object[]> queryMatchers = new HashMap<String[],Object[]>();
+        // Iterate through the query parts and create all the possible matchers to check against
+        // the user results
+        for (String part : queryParts) {
+            String[] split = part.split("=");
+            String field = split[0].trim();
+            String value = split.length > 1 ? split[1].trim() : "";
+            
+            Object[] matchers;
+            // Find the field and appropriate values for the query matcher
+            if (value.equals("true") || value.equals("false")) {
+                matchers = new Object[] { getPatternFromValue(value), Boolean.valueOf(value) };
+            } else if (value.equals("null")) {
+                matchers = new Object[] { null, getPatternFromValue(value) };
+            } else if (value.isEmpty()) {
+                matchers = new Object[] { "" };
+            } else {
+                matchers = new Object[] { getPatternFromValue(value) };
+            }
+            queryMatchers.put(new String[] { field }, matchers);
+        }
+        
+        // Start with a full list of records and then delete from the list when they don't match
+        // a qualification. Will be left with a list of values that match all qualifications.
+        List<Record> matchedRecords = records;        
+        for (Map.Entry<String[],Object[]> entry : queryMatchers.entrySet()) {
+            List<Record> matchedRecordsEntry = new ArrayList<Record>();
+            for (String field : entry.getKey()) {
+                for (Record record : matchedRecords) {
+                    // If the field being matched isn't a key on the record, add it to the matched
+                    // record list automatically so we aren't trying to query against information
+                    // that doesn't exist on the object
+                    if (!record.getRecord().containsKey(field)) matchedRecordsEntry.add(record);
+                    // Check if the object matches the field qualification if it hasn't already been
+                    // successfully matched
+                    if (!matchedRecordsEntry.contains(record)) {
+                        // Get the value for the field
+                        Object fieldValue = record.getValue(field);
+                        // Check the possible value matchers against the field value
+                        for (Object value : entry.getValue()) {
+                            if (fieldValue == value || // Objects equal
+                                fieldValue != null && value != null && (
+                                    value.getClass() == Pattern.class && ((Pattern)value).matcher(fieldValue.toString()).matches() || // fieldValue != null && Pattern matches
+                                    value.equals(fieldValue) // fieldValue != null && values equal
+                                )
+                            ) { 
+                                matchedRecordsEntry.add(record);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            matchedRecords = matchedRecordsEntry;
+        }
+        
+        return matchedRecords;
     }
     
     /**
