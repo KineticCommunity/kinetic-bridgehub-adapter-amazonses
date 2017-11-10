@@ -39,7 +39,7 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 import org.json.XML;
 import org.json.simple.JSONArray;
@@ -52,13 +52,13 @@ public class AmazonSesAdapter implements BridgeAdapter {
     /*----------------------------------------------------------------------------------------------
      * PROPERTIES
      *--------------------------------------------------------------------------------------------*/
-    
+
     /** Defines the adapter display name */
     public static final String NAME = "Amazon SES Bridge";
-    
+
     /** Defines the logger */
     protected static final org.slf4j.Logger logger = LoggerFactory.getLogger(AmazonSesAdapter.class);
-    
+
     /** Adapter version constant. */
     public static String VERSION;
     /** Load the properties version from the version.properties file. */
@@ -72,24 +72,24 @@ public class AmazonSesAdapter implements BridgeAdapter {
             VERSION = "Unknown";
         }
     }
-    
+
     /** Defines the collection of property names for the adapter */
     public static class Properties {
         public static final String ACCESS_KEY = "Access Key";
         public static final String SECRET_KEY = "Secret Key";
         public static final String REGION = "Region";
     }
-    
+
     private final ConfigurablePropertyMap properties = new ConfigurablePropertyMap(
         new ConfigurableProperty(Properties.ACCESS_KEY).setIsRequired(true),
         new ConfigurableProperty(Properties.SECRET_KEY).setIsRequired(true).setIsSensitive(true),
         new ConfigurableProperty(Properties.REGION).setIsRequired(true)
     );
-    
+
     private String accessKey;
     private String secretKey;
     private String region;
-    
+
     /*---------------------------------------------------------------------------------------------
      * SETUP METHODS
      *-------------------------------------------------------------------------------------------*/
@@ -100,34 +100,34 @@ public class AmazonSesAdapter implements BridgeAdapter {
         this.secretKey = properties.getValue(Properties.SECRET_KEY);
         this.region = properties.getValue(Properties.REGION);
     }
-    
+
     @Override
     public String getName() {
         return NAME;
     }
-    
+
     @Override
     public String getVersion() {
         return VERSION;
     }
-    
+
     @Override
     public void setProperties(Map<String,String> parameters) {
         properties.setValues(parameters);
     }
-    
+
     @Override
     public ConfigurablePropertyMap getProperties() {
         return properties;
     }
-    
+
     private static final Map<String,String> STR_ALIASES = new HashMap() {{
         put("Identities","ListIdentities");
         put("SendStatistics","GetSendStatistics");
         put("SendQuota","GetSendQuota");
         put("VerifiedEmailAddresses","ListVerifiedEmailAddresses");
     }};
-    
+
     private static final Map<String,String> NON_STD_STR_MAPPINGS = new HashMap() {{
         put("DescribeActiveReceiptRuleSet","Rules");
         put("DescribeReceiptRule","Rule");
@@ -136,7 +136,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
         put("GetSendStatistics","SendDataPoints");
         put("ListIdentityPolicies","PolicyNames");
     }};
-    
+
     /*---------------------------------------------------------------------------------------------
      * IMPLEMENTATION METHODS
      *-------------------------------------------------------------------------------------------*/
@@ -144,7 +144,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
     @Override
     public Count count(BridgeRequest request) throws BridgeError {
         RecordList recordList = search(request);
-        
+
         return new Count(recordList.getRecords().size());
     }
 
@@ -152,7 +152,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
     public Record retrieve(BridgeRequest request) throws BridgeError {
         RecordList recordList = search(request);
         List<Record> records = recordList.getRecords();
-        
+
         Record record;
         if (records.size() > 1) {
             throw new BridgeError("Multiple results matched an expected single match query");
@@ -169,7 +169,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
                 record = new Record(recordObject);
             }
         }
-        
+
         return record;
     }
 
@@ -179,26 +179,26 @@ public class AmazonSesAdapter implements BridgeAdapter {
         String structure = STR_ALIASES.containsKey(request.getStructure())
                 ? STR_ALIASES.get(request.getStructure())
                 : request.getStructure();
-        
+
         AmazonSesQualificationParser parser = new AmazonSesQualificationParser();
         String query = parser.parse(request.getQuery(),request.getParameters());
-        
+
         // The headers that we want to add to the request
         List<String> headers = new ArrayList<String>();
-        
+
         // Build the url to retrieve the ec2 data
         StringBuilder url = new StringBuilder();
         url.append("https://email.").append(this.region).append(".amazonaws.com");
         url.append("?Version=2010-12-01&Action=").append(structure);
         if (!query.isEmpty()) url.append("&").append(query);
-        
+
         // Make the request using the built up url/headers and bridge properties
         HttpResponse response = request("GET",url.toString(),headers,this.region,"email","",this.accessKey,this.secretKey);
         String output;
         try {
             output = EntityUtils.toString(response.getEntity());
         } catch (IOException e) { throw new BridgeError(e); }
-        
+
         // Parse through the returned XML to get the structure records
         JSONObject json = (JSONObject)JSONValue.parse(XML.toJSONObject(output).toString());
         if (json.containsKey("ErrorResponse")) throw new BridgeError("Invalid Structure: '"+request.getStructure()+"' is not a currently supported structure.");
@@ -206,8 +206,8 @@ public class AmazonSesAdapter implements BridgeAdapter {
         JSONObject structureResult = (JSONObject)structureResponse.get(structure+"Result");
         String structureIdentifier = NON_STD_STR_MAPPINGS.containsKey(structure) ? NON_STD_STR_MAPPINGS.get(structure) : structure.replaceFirst("\\A(?:GetIdentity|ListReceipt|List|Get|Describe)","");
         Object structureObj = structureIdentifier == null ? structureResult : structureResult.get(structureIdentifier);
-        
-        // Parse through the returned records - also handling converting 0 records returned and 
+
+        // Parse through the returned records - also handling converting 0 records returned and
         // 1 record retured to a JSONArray from an empty string and JSONObject respectively.
         JSONArray resultArray;
         if (structureObj instanceof JSONArray) {
@@ -217,8 +217,8 @@ public class AmazonSesAdapter implements BridgeAdapter {
             resultArray.add(structureObj);
         } else {
             resultArray = new JSONArray();
-        }       
-        
+        }
+
         List<Record> records = new ArrayList<Record>();
         for (Object o : resultArray) {
             JSONObject recordObj = (JSONObject)o;
@@ -253,12 +253,12 @@ public class AmazonSesAdapter implements BridgeAdapter {
                 records.add(new Record(buildRecord((JSONObject)o)));
             }
         }
-        
+
         // Define the fields - if not fields were passed, set they keySet of the a returned objects as
         // the field set
         List<String> fields = request.getFields();
         if ((fields == null || fields.isEmpty()) && !records.isEmpty()) fields = new ArrayList<String>(records.get(0).getRecord().keySet());
-        
+
         // Filter and sort the records
         records = filterRecords(records,query);
         if (request.getMetadata("order") == null) {
@@ -273,7 +273,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
             Map<String,String> orderParse = BridgeUtils.parseOrder(request.getMetadata("order"));
             records = BridgeUtils.sortRecords(orderParse, records);
         }
-        
+
         // Define the metadata
         Map<String,String> metadata = new LinkedHashMap<String,String>();
         metadata.put("size",String.valueOf(records.size()));
@@ -282,15 +282,15 @@ public class AmazonSesAdapter implements BridgeAdapter {
         // Returning the response
         return new RecordList(fields, records, metadata);
     }
-    
+
     /*----------------------------------------------------------------------------------------------
      * HELPER METHODS
      *--------------------------------------------------------------------------------------------*/
-    
+
     private static final List<String> LIST_FIELD_KEYWORDS = new ArrayList(Arrays.asList(new String[] {
         "Attributes","Tokens"
     }));
-    
+
     private Map<String,Object> buildRecord(JSONObject json) throws BridgeError {
         // Return the json keys
         Map<String,Object> record = new LinkedHashMap<String,Object>();
@@ -331,7 +331,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
         }
         return record;
     }
-    
+
     private Pattern getPatternFromValue(String value) {
         // Escape regex characters from value
         String[] parts = value.split("(?<!\\\\)%");
@@ -342,11 +342,11 @@ public class AmazonSesAdapter implements BridgeAdapter {
         if (!value.isEmpty() && value.substring(value.length() - 1).equals("%")) regex += ".*?";
         return Pattern.compile("^"+regex+"$",Pattern.CASE_INSENSITIVE);
     }
-    
+
     protected final List<Record> filterRecords(List<Record> records, String query) throws BridgeError {
         if (query == null || query.isEmpty()) return records;
         String[] queryParts = query.split("&");
-        
+
         Map<String[],Object[]> queryMatchers = new HashMap<String[],Object[]>();
         // Iterate through the query parts and create all the possible matchers to check against
         // the user results
@@ -354,7 +354,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
             String[] split = part.split("=");
             String field = split[0].trim();
             String value = split.length > 1 ? split[1].trim() : "";
-            
+
             Object[] matchers;
             // Find the field and appropriate values for the query matcher
             if (value.equals("true") || value.equals("false")) {
@@ -368,10 +368,10 @@ public class AmazonSesAdapter implements BridgeAdapter {
             }
             queryMatchers.put(new String[] { field }, matchers);
         }
-        
+
         // Start with a full list of records and then delete from the list when they don't match
         // a qualification. Will be left with a list of values that match all qualifications.
-        List<Record> matchedRecords = records;        
+        List<Record> matchedRecords = records;
         for (Map.Entry<String[],Object[]> entry : queryMatchers.entrySet()) {
             List<Record> matchedRecordsEntry = new ArrayList<Record>();
             for (String field : entry.getKey()) {
@@ -392,7 +392,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
                                     value.getClass() == Pattern.class && ((Pattern)value).matcher(fieldValue.toString()).matches() || // fieldValue != null && Pattern matches
                                     value.equals(fieldValue) // fieldValue != null && values equal
                                 )
-                            ) { 
+                            ) {
                                 matchedRecordsEntry.add(record);
                                 break;
                             }
@@ -402,24 +402,24 @@ public class AmazonSesAdapter implements BridgeAdapter {
             }
             matchedRecords = matchedRecordsEntry;
         }
-        
+
         return matchedRecords;
     }
-    
+
     /**
      * This method builds and sends a request to the Amazon EC2 REST API given the inputted
      * data and return a HttpResponse object after the call has returned. This method mainly helps with
      * creating a proper signature for the request (documentation on the Amazon REST API signing
      * process can be found here - http://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html),
      * but it also throws and logs an error if a 401 or 403 is retrieved on the attempted call.
-     * 
+     *
      * @param url
      * @param headers
      * @param region
      * @param accessKey
      * @param secretKey
      * @return
-     * @throws BridgeError 
+     * @throws BridgeError
      */
     private HttpResponse request(String method, String url, List<String> headers, String region, String service, String payload, String accessKey, String secretKey) throws BridgeError {
         // Build a datetime timestamp of the current time (in UTC). This will be sent as a header
@@ -429,7 +429,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
         df.setTimeZone(TimeZone.getTimeZone("UTC"));
         String datetime = df.format(new Date());
         String date = datetime.split("T")[0];
-        
+
         // Create a URI from the request URL so that we can pull the host/path/query from it
         URI uri;
         try {
@@ -437,12 +437,12 @@ public class AmazonSesAdapter implements BridgeAdapter {
         } catch (URISyntaxException e) {
             throw new BridgeError("There was an error parsing the inputted url '"+url+"' into a java URI.",e);
         }
-        
+
         /* BUILD CANONCIAL REQUEST (uri, query, headers, signed headers, hashed payload)*/
-        
+
         // Canonical URI (the part of the URL between the host and the ?. If blank, the uri is just /)
         String canonicalUri = uri.getPath().isEmpty() ? "/" : uri.getPath();
-        
+
         // Canonical Query (parameter names sorted by asc and param names and values escaped
         // and trimmed)
         String canonicalQuery;
@@ -453,14 +453,14 @@ public class AmazonSesAdapter implements BridgeAdapter {
                 queryMap.put(parameter.split("=")[0].trim(), parameter.split("=")[1].trim());
             }
         }
-        
+
         StringBuilder queryBuilder = new StringBuilder();
         for (String key : new TreeSet<String>(queryMap.keySet())) {
             if (!queryBuilder.toString().isEmpty()) queryBuilder.append("&");
             queryBuilder.append(URLEncoder.encode(key)).append("=").append(URLEncoder.encode(queryMap.get(key)));
         }
         canonicalQuery = queryBuilder.toString();
-        
+
         // Canonical Headers (lowercase and sort headers, add host and date headers if they aren't
         // already included, then create a header string with trimmed name and values and a new line
         // character after each header - including the last one)
@@ -479,14 +479,14 @@ public class AmazonSesAdapter implements BridgeAdapter {
             headerBuilder.append(key).append(":").append(headerMap.get(key)).append("\n");
         }
         canonicalHeaders = headerBuilder.toString();
-        
+
         // Signed Headers (a semicolon separated list of heads that were signed in the previous step)
         String signedHeaders = StringUtils.join(new TreeSet<String>(headerMap.keySet()),";");
-        
+
         // Hashed Payload (a SHA256 hexdigest with the request payload - because the bridge only
         // does GET requests the payload will always be an empty string)
         String hashedPayload = DigestUtils.sha256Hex(payload);
-        
+
         // Canonical Request (built out of 6 parts - the request method and the previous 5 steps in order
         // - with a newline in between each step and then a SHA256 hexdigest run on the resulting string)
         StringBuilder requestBuilder = new StringBuilder();
@@ -496,16 +496,16 @@ public class AmazonSesAdapter implements BridgeAdapter {
         requestBuilder.append(canonicalHeaders).append("\n");
         requestBuilder.append(signedHeaders).append("\n");
         requestBuilder.append(hashedPayload);
-        
+
         logger.debug(requestBuilder.toString());
         // Run the resulting string through a SHA256 hexdigest
         String canonicalRequest = DigestUtils.sha256Hex(requestBuilder.toString());
-        
+
         /* BUILD STRING TO SIGN (credential scope, string to sign) */
-        
+
         // Credential Scope (date, region, service, and terminating string [which is always aws4_request)
         String credentialScope = String.format("%s/%s/%s/aws4_request",date,region,service);
-        
+
         // String to Sign (encryption method, datetime, credential scope, and canonical request)
         StringBuilder stringToSignBuilder = new StringBuilder();
         stringToSignBuilder.append("AWS4-HMAC-SHA256").append("\n");
@@ -514,9 +514,9 @@ public class AmazonSesAdapter implements BridgeAdapter {
         stringToSignBuilder.append(canonicalRequest);
         logger.debug(stringToSignBuilder.toString());
         String stringToSign = stringToSignBuilder.toString();
-        
+
         /* CREATE THE SIGNATURE (signing key, signature) */
-        
+
         // Signing Key
         byte[] signingKey;
         try {
@@ -524,7 +524,7 @@ public class AmazonSesAdapter implements BridgeAdapter {
         } catch (Exception e) {
             throw new BridgeError("There was a problem creating the signing key",e);
         }
-        
+
         // Signature
         String signature;
         try {
@@ -532,12 +532,12 @@ public class AmazonSesAdapter implements BridgeAdapter {
         } catch (Exception e) {
             throw new BridgeError("There was a problem creating the signature",e);
         }
-        
+
         // Authorization Header (encryption method, access key, credential scope, signed headers, signature))
         String authorization = String.format("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",accessKey,credentialScope,signedHeaders,signature);
-        
+
         /* CREATE THE HTTP REQUEST */
-        HttpClient client = new DefaultHttpClient();
+        HttpClient client = HttpClients.createDefault();
         HttpRequestBase request;
         try {
             if (method.toLowerCase().equals("get")) {
@@ -557,20 +557,20 @@ public class AmazonSesAdapter implements BridgeAdapter {
 
             request.setHeader(header.getKey(),header.getValue());
         }
-        
+
         HttpResponse response;
         try {
             response = client.execute(request);
-            
+
             if (response.getStatusLine().getStatusCode() == 401 || response.getStatusLine().getStatusCode() == 403) {
                 logger.error(EntityUtils.toString(response.getEntity()));
                 throw new BridgeError("User not authorized to access this resource. Check the logs for more details.");
             }
         } catch (IOException e) { throw new BridgeError(e); }
-        
+
         return response;
     }
-    
+
     static byte[] HmacSHA256(byte[] key, String data) throws Exception {
         String algorithm = "HmacSHA256";
         Mac mac = Mac.getInstance(algorithm);
